@@ -2,25 +2,17 @@ import math
 from typing import Dict, Any, Optional
 
 class LiquidationsDealEngine:
-    def __init__(self, symbol: str, main_side: str, base_entry_price: float, base_qty: float, target_profit_usd: float = 0.50):
-        self.symbol = symbol.upper()
-        self.main_side = main_side.upper()  # "SHORT" or "LONG"
-        self.main_qty = base_qty
-        self.main_avg_entry = base_entry_price
-        self.target_profit_usd = target_profit_usd
+    def __init__(self, symbol, main_side, base_entry_price, base_qty, max_dca_steps=4, price_step_distance=1200.0):
+        self.symbol = symbol
+        self.main_side = main_side.upper()
+        self.base_entry_price = base_entry_price
+        self.base_qty = base_qty
+        self.max_dca_steps = max_dca_steps
+        self.price_step_distance = price_step_distance # Distance in dollars between safety steps
         
-        # DCA Safety Ladder State
-        self.dca_count = 0
-        self.max_dca = 4
-        
-        # Counter-Hedge State
-        self.is_hedged = False
-        self.hedge_side = "LONG" if self.main_side == "SHORT" else "SHORT"
-        self.hedge_qty = 0.0
-        self.hedge_avg_entry = 0.0
-        
-        # Realized Buffer (Funding fees, closed partials)
-        self.realized_pnl_usd = 0.0
+        # Track active positions and filled safety steps
+        self.dca_fills = []  # List of filled safety orders
+        self.posture = "Standard"
 
     def process_dca_fill(self, fill_qty: float, fill_price: float):
         """Simulates filling a safety DCA order and recalculates the main average entry price."""
@@ -48,59 +40,61 @@ class LiquidationsDealEngine:
         notional_ratio = (self.hedge_qty / self.main_qty) * 100.0
         print(f"🛡️ [{self.symbol}] Hedge Updated: Size = {self.hedge_qty} ({notional_ratio:.1f}% Notional) @ Avg {self.hedge_avg_entry:.5f}")
 
-    def evaluate_deal_state(self, current_price: float) -> Dict[str, Any]:
-        """
-        Evaluates current unrealized PnL, calculates net delta, 
-        and solves for the target Paired Take-Profit (PTP) price.
-        """
-        # 1. Calculate Main Leg PnL
-        main_dir = -1.0 if self.main_side == "SHORT" else 1.0
-        main_pnl = self.main_qty * (current_price - self.main_avg_entry) * main_dir
-
-        # 2. Calculate Hedge Leg PnL
-        hedge_pnl = 0.0
-        if self.is_hedged and self.hedge_qty > 0:
-            hedge_dir = 1.0 if self.hedge_side == "LONG" else -1.0
-            hedge_pnl = self.hedge_qty * (current_price - self.hedge_avg_entry) * hedge_dir
-
-        total_net_pnl = main_pnl + hedge_pnl + self.realized_pnl_usd
-
-        # 3. Net Delta Calculation (Signed Quantity)
-        main_signed_qty = self.main_qty * main_dir
-        hedge_signed_qty = self.hedge_qty * (1.0 if self.hedge_side == "LONG" else -1.0)
-        net_delta_qty = main_signed_qty + hedge_signed_qty
-
-        # 4. PTP Solver & Feasibility Check
-        if abs(net_delta_qty) < 1e-8:
-            ptp_status = "UNREACHABLE (Delta Completely Neutral)"
-            calculated_ptp = None
-        else:
-            constant_term = (self.main_qty * self.main_avg_entry * main_dir) + \
-                            (self.hedge_qty * self.hedge_avg_entry * (1.0 if self.hedge_side == "LONG" else -1.0))
+    def evaluate_deal_state(self, current_price):
+        """Evaluates current market price against entry and safety ladder thresholds."""
+        
+        # 1. Check if we need to trigger safety DCA steps (for a SHORT position, price goes UP)
+        if self.main_side == "SHORT":
+            adverse_move = current_price - self.base_entry_price
             
-            calculated_ptp = (self.target_profit_usd - self.realized_pnl_usd + constant_term) / net_delta_qty
+            # Calculate how many safety steps *should* be triggered based on price distance
+            expected_steps = int(adverse_move // self.price_step_distance)
+            expected_steps = max(0, min(expected_steps, self.max_dca_steps))
+            
+            # If the market has climbed enough to trigger a new step that hasn't filled yet:
+            while len(self.dca_fills) < expected_steps:
+                step_num = len(self.dca_fills) + 1
+                trigger_price = self.base_entry_price + (step_num * self.price_step_distance)
+                
+                # Record the new safety DCA fill
+                self.dca_fills.append({
+                    "step": step_num,
+                    "price": trigger_price,
+                    "qty": self.base_qty * (1.5 ** step_num) # Optional: compounding size per step
+                })
+                print(f"🚨 [SAFETY TRIGGER] Step {step_num} filled at ${trigger_price:,.2f}!")
 
-            # Directional Solvency Checking (Updated with >= and <= to handle exact target hits)
-            if net_delta_qty > 0 and calculated_ptp >= current_price:
-                ptp_status = "REACHABLE (Net Long Posture)"
-            elif net_delta_qty < 0 and calculated_ptp <= current_price:
-                ptp_status = "REACHABLE (Net Short Posture)"
-            elif abs(calculated_ptp - current_price) < 1e-4:
-                ptp_status = "TARGET REACHED / MET"
+            # 2. Update posture if safety steps are active
+            if len(self.dca_fills) > 0:
+                self.posture = f"Safety DCA Active (Step {len(self.dca_fills)})"
             else:
-                ptp_status = "UNREACHABLE AT CURRENT DELTA (Paradox State)"
+                self.posture = "Standard"
+
+        # 3. Calculate total net PnL across base entry + all safety fills
+        total_qty = self.base_qty + sum(d['qty'] for d in self.dca_fills)
+        
+        # Simplified short PnL calculation for demonstration
+        # (Total Entry Value - Current Value)
+        total_cost_basis = (self.base_entry_price * self.base_qty) + sum(d['price'] * d['qty'] for d in self.dca_fills)
+        current_market_value = total_qty * current_price
+        
+        if self.main_side == "SHORT":
+            total_net_pnl = total_cost_basis - current_market_value
+        else:
+            total_net_pnl = current_market_value - total_cost_basis
+
+        # 4. Check PTP (Paired Take-Profit) status
+        ptp_status = "REACHABLE" if total_net_pnl >= 0 else "UNREACHABLE AT CURRENT DELTA (Paradox State)"
 
         return {
             "symbol": self.symbol,
             "current_price": current_price,
-            "main_unrealized_pnl": round(main_pnl, 2),
-            "hedge_unrealized_pnl": round(hedge_pnl, 2),
-            "total_net_pnl_usd": round(total_net_pnl, 2),
-            "net_delta_qty": round(net_delta_qty, 4),
+            "total_net_pnl_usd": total_net_pnl,
             "ptp_status": ptp_status,
-            "target_ptp_price": round(calculated_ptp, 5) if calculated_ptp else None,
-            "notional_hedge_ratio": f"{(self.hedge_qty / self.main_qty) * 100:.1f}%" if self.main_qty > 0 else "0%"
+            "posture": self.posture,
+            "active_dca_steps": len(self.dca_fills)
         }
+        
 
 
 # ==========================================
