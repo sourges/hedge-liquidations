@@ -1,0 +1,10 @@
+{
+    "exchange": "krakenfutures",
+    "symbol": "BTC/USD:USD",
+    "main_side": "SHORT",
+    "base_entry_price": 64000.0,
+    "base_qty": 0.1,
+    "target_profit_usd": 0.50,
+    "max_dca_steps": 4,
+    "poll_interval_seconds": 5
+}
