@@ -1,0 +1,11 @@
+# Ignore virtual environments
+venv/
+env/
+.venv/
+
+# Ignore Python bytecode caches
+__pycache__/
+*.pyc
+
+# Ignore local state/memory files (so your local bot runtime isn't tracked)
+deal_state.json
