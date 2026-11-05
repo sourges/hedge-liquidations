@@ -1,6 +1,5 @@
 {
-    "pairs": ["PF_XBTUSD", "PF_ETHUSD", "PF_SOLUSD", "PF_HYPEUSD",
-             "PF_XRPUSD", "PF_DOGEUSD", "PF_ZECUSD", "PF_LINKUSD"],
+    "pairs": ["PF_XBTUSD", "PF_ETHUSD", "PF_SOLUSD", "PF_HYPEUSD"],
     "vwma_timeframe": "1h",
     "vwma_period": 14,
     "vwma_refresh_seconds": 300,
